@@ -15,54 +15,54 @@ type HaClient struct {
 	URI          string
 	Token        string
 	Conn         *websocket.Conn
-	AuthChannel  chan *message
-	OtherChannel chan *message
-	EventChannel chan *message
+	AuthChannel  chan *Message
+	OtherChannel chan *Message
+	EventChannel chan *Message
 	ID           int64
 	entities     []string
 }
 
-type message struct {
+type Message struct {
 	ID          int64             `json:"id,omitempty"`
 	AccessToken string            `json:"access_token,omitempty"`
 	Type        string            `json:"type,omitempty"`
-	Event       *event            `json:"event,omitempty"`
+	Event       *Event            `json:"event,omitempty"`
 	EventType   string            `json:"event_type,omitempty"`
 	Domain      string            `json:"domain,omitempty"`
 	Service     string            `json:"service,omitempty"`
 	ServiceData interface{}       `json:"service_data,omitempty"`
 	Target      map[string]string `json:"target,omitempty"`
 	Success     bool              `json:"success,omitempty"`
-	Result      *hacontext        `json:"result,omitempty"`
+	Result      *HaContext        `json:"result,omitempty"`
 }
 
-type event struct {
-	Data *data `json:"data,omitempty"`
+type Event struct {
+	Data *Data `json:"data,omitempty"`
 }
 
-type data struct {
+type Data struct {
 	EntityID  string                 `json:"entity_id,omitempty"`
 	EventType string                 `json:"data,omitempty"`
 	TimeFired time.Time              `json:"time_fired,omitempty"`
 	Origin    string                 `json:"origin,omitempty"`
-	Context   *hacontext             `json:"context,omitempty"`
-	NewState  *state                 `json:"new_state,omitempty"`
+	Context   *HaContext             `json:"context,omitempty"`
+	NewState  *State                 `json:"new_state,omitempty"`
 	OldState  map[string]interface{} `json:"old_state,omitempty"`
 }
 
-type hacontext struct {
+type HaContext struct {
 	ID       string `json:"id,omitempty"`
 	ParentID string `json:"parent_id,omitempty"`
 	UserID   string `json:"user_id,omitempty"`
 }
 
-type state struct {
+type State struct {
 	DeviceClass       string      `json:"device_class,omitempty"`
 	FriendlyName      string      `json:"friendly_name,omitempty"`
 	Icon              string      `json:"icon,omitempty"`
 	StateClass        string      `json:"state_class,omitempty"`
 	UnitOfMeasurement string      `json:"unit_of_measurement,omitempty"`
-	Context           *hacontext  `json:"context,omitempty"`
+	Context           *HaContext  `json:"context,omitempty"`
 	EntityID          string      `json:"entity_id,omitempty"`
 	LastChanged       time.Time   `json:"last_changed,omitempty"`
 	LastUpdated       time.Time   `json:"last_updated,omitempty"`
@@ -71,9 +71,9 @@ type state struct {
 
 func New(ctx context.Context, URI, token string) *HaClient {
 	client := &HaClient{URI: URI, Token: token}
-	client.AuthChannel = make(chan *message)
-	client.OtherChannel = make(chan *message)
-	client.EventChannel = make(chan *message)
+	client.AuthChannel = make(chan *Message)
+	client.OtherChannel = make(chan *Message)
+	client.EventChannel = make(chan *Message)
 	client.connect(ctx)
 	go receiver(ctx, client)
 	client.ID = 1
@@ -87,7 +87,7 @@ func receiver(ctx context.Context, ha *HaClient) {
 		case <-ctx.Done():
 			loop = false
 		default:
-			buf := &message{}
+			buf := &Message{}
 			err := wsjson.Read(ctx, ha.Conn, buf)
 			if err != nil {
 				log.Printf("could not read from HA WS 1: %v\n", err)
@@ -123,7 +123,7 @@ func (ha *HaClient) connect(ctx context.Context) {
 	log.Printf("connect ok")
 	//defer ha.Conn.Close(websocket.StatusInternalError, "the sky is falling")
 
-	buf := &message{}
+	buf := &Message{}
 	err = wsjson.Read(ctx, ha.Conn, buf)
 	if err != nil {
 		log.Fatalf("could not read from websocket: %v", err)
@@ -133,7 +133,7 @@ func (ha *HaClient) connect(ctx context.Context) {
 		log.Printf("auth required")
 	}
 
-	am := message{
+	am := Message{
 		Type:        "auth",
 		AccessToken: ha.Token,
 	}
@@ -144,7 +144,7 @@ func (ha *HaClient) connect(ctx context.Context) {
 
 	log.Printf("wrote auth message")
 
-	buf = &message{}
+	buf = &Message{}
 	err = wsjson.Read(ctx, ha.Conn, buf)
 	if err != nil {
 		log.Printf("could not read from HA WS")
@@ -152,7 +152,7 @@ func (ha *HaClient) connect(ctx context.Context) {
 }
 
 func (ha *HaClient) SubscribeToUpdates(ctx context.Context) error {
-	se := &message{
+	se := &Message{
 		ID:        ha.ID,
 		Type:      "subscribe_events",
 		EventType: "state_changed",
@@ -174,7 +174,7 @@ func (ha *HaClient) SubscribeToUpdates(ctx context.Context) error {
 }
 
 func (ha *HaClient) CallService(ctx context.Context, domain string, service string, serviceData interface{}) error {
-	se := &message{
+	se := &Message{
 		ID:          ha.ID,
 		Type:        "call_service",
 		Domain:      domain,
@@ -197,7 +197,7 @@ func (ha *HaClient) CallService(ctx context.Context, domain string, service stri
 	return nil
 }
 
-func (ha *HaClient) filterMessage(message *message) bool {
+func (ha *HaClient) filterMessage(message *Message) bool {
 	if message != nil && message.Event != nil && message.Event.Data != nil {
 		for _, k := range ha.entities {
 			if k == message.Event.Data.EntityID {
