@@ -90,12 +90,14 @@ func receiver(ctx context.Context, ha *HaClient) {
 			buf := &Message{}
 			err := wsjson.Read(ctx, ha.Conn, buf)
 			if err != nil {
-				log.Printf("could not read from HA WS 1: %v\n", err)
+				log.Printf("HA: could not read from HA WS 1: %v\n", err)
+				loop = false
 			} else {
 				switch buf.Type {
 				case "auth":
 					ha.AuthChannel <- buf
 				case "event":
+					//log.Printf("HA: receiveed event: %v", buf.Event.Data.EntityID)
 					if ha.filterMessage(buf) {
 						ha.EventChannel <- buf
 					}
@@ -105,10 +107,11 @@ func receiver(ctx context.Context, ha *HaClient) {
 			}
 		}
 	}
-	log.Printf("closing channels")
+	log.Printf("HA: closing channels")
 	close(ha.AuthChannel)
 	close(ha.EventChannel)
 	close(ha.OtherChannel)
+	log.Printf("HA: done closing channels")
 }
 
 func (ha *HaClient) connect(ctx context.Context) {
@@ -117,20 +120,20 @@ func (ha *HaClient) connect(ctx context.Context) {
 	var err error
 	ha.Conn, _, err = websocket.Dial(ctx, fullHAWSURI, nil)
 	if err != nil {
-		log.Fatalf("could not connect: %v", err)
+		log.Fatalf("HA: could not connect: %v", err)
 	}
 
-	log.Printf("connect ok")
+	log.Printf("HA: connect ok")
 	//defer ha.Conn.Close(websocket.StatusInternalError, "the sky is falling")
 
 	buf := &Message{}
 	err = wsjson.Read(ctx, ha.Conn, buf)
 	if err != nil {
-		log.Fatalf("could not read from websocket: %v", err)
+		log.Fatalf("HA: could not read from websocket: %v", err)
 	}
 
 	if buf.Type == "auth_required" {
-		log.Printf("auth required")
+		log.Printf("HA: auth required")
 	}
 
 	am := Message{
@@ -139,15 +142,15 @@ func (ha *HaClient) connect(ctx context.Context) {
 	}
 	err = wsjson.Write(ctx, ha.Conn, am)
 	if err != nil {
-		log.Fatalf("could not write to websocket: %v", err)
+		log.Fatalf("HA: could not write to websocket: %v", err)
 	}
 
-	log.Printf("wrote auth message")
+	log.Printf("HA: wrote auth message")
 
 	buf = &Message{}
 	err = wsjson.Read(ctx, ha.Conn, buf)
 	if err != nil {
-		log.Printf("could not read from HA WS")
+		log.Printf("HA: could not read from HA WS")
 	}
 }
 
@@ -167,7 +170,7 @@ func (ha *HaClient) SubscribeToUpdates(ctx context.Context) error {
 	buf := <-ha.OtherChannel
 
 	if !buf.Success {
-		return errors.New("could not subscribe to updates from HA")
+		return errors.New("HA: could not subscribe to updates from HA")
 	}
 
 	return nil
@@ -191,7 +194,7 @@ func (ha *HaClient) CallService(ctx context.Context, domain string, service stri
 	buf := <-ha.OtherChannel
 
 	if !buf.Success {
-		return errors.New("could not call service from HA")
+		return errors.New("HA: could not call service from HA")
 	}
 
 	return nil
