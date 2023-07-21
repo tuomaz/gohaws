@@ -176,13 +176,21 @@ func (ha *HaClient) SubscribeToUpdates(ctx context.Context) error {
 	return nil
 }
 
-func (ha *HaClient) CallService(ctx context.Context, domain string, service string, serviceData interface{}) error {
+func (ha *HaClient) CallService(ctx context.Context, domain string, service string, serviceData interface{}, target string) error {
+
+	targetMap := make(map[string]string)
+
+	if target != "" {
+		targetMap["entity_id"] = target
+	}
+
 	se := &Message{
 		ID:          ha.ID,
 		Type:        "call_service",
 		Domain:      domain,
 		Service:     service,
 		ServiceData: serviceData,
+		Target:      targetMap,
 	}
 	err := wsjson.Write(ctx, ha.Conn, se)
 	ha.ID = ha.ID + 1
