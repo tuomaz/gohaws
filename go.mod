@@ -1,7 +1,5 @@
 module github.com/tuomaz/gohaws
 
-go 1.18
+go 1.21
 
-require nhooyr.io/websocket v1.8.7
-
-require github.com/klauspost/compress v1.10.3 // indirect
+require nhooyr.io/websocket v1.8.17

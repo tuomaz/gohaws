@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"nhooyr.io/websocket"
@@ -15,10 +17,12 @@ type HaClient struct {
 	URI          string
 	Token        string
 	Conn         *websocket.Conn
+	connMu       sync.RWMutex
 	AuthChannel  chan *Message
 	OtherChannel chan *Message
 	EventChannel chan *Message
-	ID           int64
+	id           atomic.Int64
+	entitiesMu   sync.RWMutex
 	entities     []string
 }
 
@@ -69,44 +73,82 @@ type State struct {
 	State             interface{} `json:"state,omitempty"`
 }
 
-func New(ctx context.Context, URI, token string) *HaClient {
+func New(ctx context.Context, URI, token string) (*HaClient, error) {
 	client := &HaClient{URI: URI, Token: token}
-	client.AuthChannel = make(chan *Message)
-	client.OtherChannel = make(chan *Message)
-	client.EventChannel = make(chan *Message)
-	client.connect(ctx)
+	client.AuthChannel = make(chan *Message, 10)
+	client.OtherChannel = make(chan *Message, 10)
+	client.EventChannel = make(chan *Message, 10)
+	err := client.connect(ctx)
+	if err != nil {
+		return nil, err
+	}
 	go receiver(ctx, client)
-	client.ID = 1
-	return client
+	client.id.Store(1)
+	return client, nil
 }
 
 func receiver(ctx context.Context, ha *HaClient) {
-	loop := true
-	for loop {
+	for {
 		select {
 		case <-ctx.Done():
-			loop = false
+			log.Printf("HA: receiver stopping due to context done")
+			goto done
 		default:
+			ha.connMu.RLock()
+			conn := ha.Conn
+			ha.connMu.RUnlock()
+
+			if conn == nil {
+				time.Sleep(time.Second)
+				continue
+			}
+
 			buf := &Message{}
-			err := wsjson.Read(ctx, ha.Conn, buf)
+			err := wsjson.Read(ctx, conn, buf)
 			if err != nil {
-				log.Printf("HA: could not read from HA WS 1: %v\n", err)
-				loop = false
-			} else {
-				switch buf.Type {
-				case "auth":
-					ha.AuthChannel <- buf
-				case "event":
-					//log.Printf("HA: receiveed event: %v", buf.Event.Data.EntityID)
-					if ha.filterMessage(buf) {
-						ha.EventChannel <- buf
+				log.Printf("HA: could not read from HA WS: %v\n", err)
+				// Connection might be closed, try to reconnect
+				ha.connMu.Lock()
+				ha.Conn = nil
+				ha.connMu.Unlock()
+
+				go func() {
+					for {
+						select {
+						case <-ctx.Done():
+							return
+						default:
+							log.Printf("HA: attempting to reconnect...")
+							if err := ha.connect(ctx); err == nil {
+								log.Printf("HA: reconnected")
+								return
+							}
+							time.Sleep(5 * time.Second)
+						}
 					}
+				}()
+				time.Sleep(time.Second) // Give it a moment before trying to read again
+				continue
+			}
+
+			switch buf.Type {
+			case "auth":
+				ha.AuthChannel <- buf
+			case "event":
+				if ha.filterMessage(buf) {
+					ha.EventChannel <- buf
+				}
+			default:
+				select {
+				case ha.OtherChannel <- buf:
 				default:
-					ha.OtherChannel <- buf
+					log.Printf("HA: OtherChannel full, dropping message")
 				}
 			}
 		}
 	}
+
+done:
 	log.Printf("HA: closing channels")
 	close(ha.AuthChannel)
 	close(ha.EventChannel)
@@ -114,22 +156,25 @@ func receiver(ctx context.Context, ha *HaClient) {
 	log.Printf("HA: done closing channels")
 }
 
-func (ha *HaClient) connect(ctx context.Context) {
+func (ha *HaClient) connect(ctx context.Context) error {
 	fullHAWSURI := fmt.Sprintf("%s/api/websocket", ha.URI)
 
-	var err error
-	ha.Conn, _, err = websocket.Dial(ctx, fullHAWSURI, nil)
+	ha.connMu.Lock()
+	defer ha.connMu.Unlock()
+
+	conn, _, err := websocket.Dial(ctx, fullHAWSURI, nil)
 	if err != nil {
-		log.Fatalf("HA: could not connect: %v", err)
+		return fmt.Errorf("HA: could not connect: %w", err)
 	}
 
+	ha.Conn = conn
 	log.Printf("HA: connect ok")
-	//defer ha.Conn.Close(websocket.StatusInternalError, "the sky is falling")
 
 	buf := &Message{}
 	err = wsjson.Read(ctx, ha.Conn, buf)
 	if err != nil {
-		log.Fatalf("HA: could not read from websocket: %v", err)
+		ha.Conn.Close(websocket.StatusAbnormalClosure, "read error during handshake")
+		return fmt.Errorf("HA: could not read from websocket: %w", err)
 	}
 
 	if buf.Type == "auth_required" {
@@ -142,7 +187,8 @@ func (ha *HaClient) connect(ctx context.Context) {
 	}
 	err = wsjson.Write(ctx, ha.Conn, am)
 	if err != nil {
-		log.Fatalf("HA: could not write to websocket: %v", err)
+		ha.Conn.Close(websocket.StatusAbnormalClosure, "write error during handshake")
+		return fmt.Errorf("HA: could not write to websocket: %w", err)
 	}
 
 	log.Printf("HA: wrote auth message")
@@ -150,19 +196,35 @@ func (ha *HaClient) connect(ctx context.Context) {
 	buf = &Message{}
 	err = wsjson.Read(ctx, ha.Conn, buf)
 	if err != nil {
-		log.Printf("HA: could not read from HA WS")
+		ha.Conn.Close(websocket.StatusAbnormalClosure, "read error after auth")
+		return fmt.Errorf("HA: could not read from HA WS: %w", err)
 	}
+
+	if buf.Type != "auth_ok" {
+		ha.Conn.Close(websocket.StatusAbnormalClosure, "auth failed")
+		return fmt.Errorf("HA: auth failed: %v", buf.Type)
+	}
+
+	return nil
 }
 
 func (ha *HaClient) SubscribeToUpdates(ctx context.Context) error {
+	id := ha.id.Add(1)
 	se := &Message{
-		ID:        ha.ID,
+		ID:        id,
 		Type:      "subscribe_events",
 		EventType: "state_changed",
 	}
-	err := wsjson.Write(ctx, ha.Conn, se)
-	ha.ID = ha.ID + 1
 
+	ha.connMu.RLock()
+	conn := ha.Conn
+	ha.connMu.RUnlock()
+
+	if conn == nil {
+		return errors.New("HA: not connected")
+	}
+
+	err := wsjson.Write(ctx, conn, se)
 	if err != nil {
 		return err
 	}
@@ -177,7 +239,7 @@ func (ha *HaClient) SubscribeToUpdates(ctx context.Context) error {
 }
 
 func (ha *HaClient) CallService(ctx context.Context, domain string, service string, serviceData interface{}, target string) error {
-
+	id := ha.id.Add(1)
 	targetMap := make(map[string]string)
 
 	if target != "" {
@@ -185,16 +247,23 @@ func (ha *HaClient) CallService(ctx context.Context, domain string, service stri
 	}
 
 	se := &Message{
-		ID:          ha.ID,
+		ID:          id,
 		Type:        "call_service",
 		Domain:      domain,
 		Service:     service,
 		ServiceData: serviceData,
 		Target:      targetMap,
 	}
-	err := wsjson.Write(ctx, ha.Conn, se)
-	ha.ID = ha.ID + 1
 
+	ha.connMu.RLock()
+	conn := ha.Conn
+	ha.connMu.RUnlock()
+
+	if conn == nil {
+		return errors.New("HA: not connected")
+	}
+
+	err := wsjson.Write(ctx, conn, se)
 	if err != nil {
 		return err
 	}
@@ -209,6 +278,8 @@ func (ha *HaClient) CallService(ctx context.Context, domain string, service stri
 }
 
 func (ha *HaClient) filterMessage(message *Message) bool {
+	ha.entitiesMu.RLock()
+	defer ha.entitiesMu.RUnlock()
 	if message != nil && message.Event != nil && message.Event.Data != nil {
 		for _, k := range ha.entities {
 			if k == message.Event.Data.EntityID {
@@ -220,5 +291,7 @@ func (ha *HaClient) filterMessage(message *Message) bool {
 }
 
 func (ha *HaClient) Add(entityName string) {
+	ha.entitiesMu.Lock()
+	defer ha.entitiesMu.Unlock()
 	ha.entities = append(ha.entities, entityName)
 }
