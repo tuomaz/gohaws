@@ -111,6 +111,9 @@ func receiver(ctx context.Context, ha *HaClient) {
 				continue
 			}
 
+			// Force read limit on every loop to prevent potential resets or misconfigurations
+			conn.SetReadLimit(16 * 1024 * 1024)
+
 			buf := &Message{}
 			err := wsjson.Read(ctx, conn, buf)
 			if err != nil {
