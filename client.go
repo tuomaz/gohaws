@@ -187,8 +187,8 @@ func (ha *HaClient) connect(ctx context.Context) error {
 		return fmt.Errorf("HA: could not connect: %w", err)
 	}
 
-	// Increase read limit to 1MB as Home Assistant state responses can be large
-	conn.SetReadLimit(1024 * 1024)
+	// Increase read limit to 16MB as Home Assistant state responses can be very large
+	conn.SetReadLimit(16 * 1024 * 1024)
 
 	ha.Conn = conn
 	log.Printf("HA: connect ok")
